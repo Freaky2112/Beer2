@@ -35,12 +35,23 @@ class User(UserMixin, db.Model):
     username = db.Column(db.String(50), unique=True, nullable=False)
     email = db.Column(db.String(160), unique=True, nullable=False)
     password_hash = db.Column(db.String(255), nullable=False)
+    is_admin = db.Column(db.Boolean, nullable=False, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     beers = db.relationship("Beer", backref="owner", cascade="all, delete-orphan")
     breweries = db.relationship("Brewery", backref="owner", cascade="all, delete-orphan")
     wishlist_items = db.relationship("Wishlist", backref="owner", cascade="all, delete-orphan")
     def set_password(self, password): self.password_hash = generate_password_hash(password)
     def check_password(self, password): return check_password_hash(self.password_hash, password)
+
+class Invitation(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    token_hash = db.Column(db.String(64), unique=True, nullable=False)
+    created_by_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    used_at = db.Column(db.DateTime)
+    revoked_at = db.Column(db.DateTime)
+    creator = db.relationship("User", foreign_keys=[created_by_id])
 
 class Brewery(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -109,6 +120,21 @@ def owned_brewery(brewery_id):
     if not brewery or brewery.user_id != current_user.id: abort(404)
     return brewery
 
+def admin_required(view):
+    @wraps(view)
+    @login_required
+    def wrapped(*args, **kwargs):
+        if not current_user.is_admin: abort(403)
+        return view(*args, **kwargs)
+    return wrapped
+
+def invitation_status(invite):
+    now=datetime.utcnow()
+    if invite.revoked_at: return "revoked"
+    if invite.used_at: return "used"
+    if invite.expires_at <= now: return "expired"
+    return "pending"
+
 @app.route("/language/<code>")
 def language(code):
     if code in ("en","fr"): session["lang"] = code
@@ -119,21 +145,25 @@ def home(): return redirect(url_for("dashboard") if current_user.is_authenticate
 
 @app.route("/register", methods=["GET","POST"])
 def register():
-    if current_user.is_authenticated: return redirect(url_for("dashboard"))
-    if request.method == "POST":
-        username=request.form.get("username","").strip()
-        email=request.form.get("email","").strip().lower()
-        password=request.form.get("password","")
-        confirm=request.form.get("confirm_password","")
+    return redirect(url_for("login"))
+
+@app.route("/invite/<token>", methods=["GET","POST"])
+def accept_invitation(token):
+    import hashlib
+    invite=Invitation.query.filter_by(token_hash=hashlib.sha256(token.encode()).hexdigest()).first()
+    if not invite or invitation_status(invite)!="pending":
+        return render_template("invitation_invalid.html"),410
+    if request.method=="POST":
+        username=request.form.get("username","").strip(); email=request.form.get("email","").strip().lower()
+        password=request.form.get("password",""); confirm=request.form.get("confirm_password","")
         if len(username)<3 or len(password)<8 or password!=confirm or not email:
             flash("Check your details: username 3+ chars, valid email, matching password (8+ chars).","warning")
-        elif User.query.filter(or_(User.username==username,User.email==email)).first():
-            flash(tr("account_exists"),"danger")
+        elif User.query.filter(or_(User.username==username,User.email==email)).first(): flash(tr("account_exists"),"danger")
         else:
             user=User(username=username,email=email); user.set_password(password)
-            db.session.add(user); db.session.commit(); login_user(user)
+            db.session.add(user); invite.used_at=datetime.utcnow(); db.session.commit(); login_user(user)
             flash(tr("signup_success"),"success"); return redirect(url_for("dashboard"))
-    return render_template("register.html")
+    return render_template("accept_invitation.html")
 
 @app.route("/login", methods=["GET","POST"])
 def login():
@@ -149,6 +179,30 @@ def login():
 @app.post("/logout")
 @login_required
 def logout(): logout_user(); return redirect(url_for("login"))
+
+@app.route("/admin")
+@admin_required
+def admin():
+    return render_template("admin.html", users=User.query.order_by(User.created_at.asc()).all(), invitations=Invitation.query.order_by(Invitation.created_at.desc()).all(), invitation_status=invitation_status)
+
+@app.post("/admin/invitations/create")
+@admin_required
+def create_invitation():
+    import hashlib
+    token=secrets.token_urlsafe(32)
+    invite=Invitation(token_hash=hashlib.sha256(token.encode()).hexdigest(),created_by_id=current_user.id,expires_at=datetime.utcnow()+__import__("datetime").timedelta(days=7))
+    db.session.add(invite); db.session.commit()
+    session["new_invitation_link"]=url_for("accept_invitation",token=token,_external=True)
+    flash("Invitation created. Copy the link now; the full token is only shown once.","success")
+    return redirect(url_for("admin"))
+
+@app.post("/admin/invitations/<int:invite_id>/revoke")
+@admin_required
+def revoke_invitation(invite_id):
+    invite=db.session.get(Invitation,invite_id)
+    if not invite: abort(404)
+    if invitation_status(invite)=="pending": invite.revoked_at=datetime.utcnow(); db.session.commit()
+    return redirect(url_for("admin"))
 
 @app.route("/dashboard")
 @login_required
@@ -321,6 +375,18 @@ def too_large(_): return "Image too large. Maximum upload size is 10 MB.",413
 
 with app.app_context():
     db.create_all()
+    from sqlalchemy import inspect, text
+    cols={c["name"] for c in inspect(db.engine).get_columns("user")}
+    if "is_admin" not in cols:
+        db.session.execute(text("ALTER TABLE user ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0")); db.session.commit()
+    if not User.query.filter_by(is_admin=True).first():
+        first=User.query.order_by(User.id.asc()).first()
+        if first: first.is_admin=True; db.session.commit()
+        else:
+            au=os.environ.get("ADMIN_USERNAME","").strip(); ae=os.environ.get("ADMIN_EMAIL","").strip().lower(); ap=os.environ.get("ADMIN_PASSWORD","")
+            if au and ae and len(ap)>=12:
+                u=User(username=au,email=ae,is_admin=True); u.set_password(ap); db.session.add(u); db.session.commit()
+            else: app.logger.warning("Set ADMIN_USERNAME, ADMIN_EMAIL and ADMIN_PASSWORD (12+ chars) in .env to create the initial administrator.")
 
 if __name__=="__main__":
     app.run(host="0.0.0.0",port=5000)
