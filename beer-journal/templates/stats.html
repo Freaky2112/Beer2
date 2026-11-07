@@ -1,9 +1,0 @@
-{% extends "base.html" %}{% block content %}<div class="eyebrow">YOUR TASTING DATA</div><h1>{{t('stats')}}</h1>
-<div class="row g-3 my-3"><div class="col-6"><div class="stat-card"><strong>{{count}}</strong><small>{{t('tasted')}}</small></div></div><div class="col-6"><div class="stat-card"><strong>{{'%.1f'|format(avg)}}</strong><small>{{t('average')}}</small></div></div></div>
-{% if count %}<div class="row g-3"><div class="col-12 col-lg-7"><div class="panel chart-panel"><h3>{{t('chart_ratings')}}</h3><canvas id="ratingsChart"></canvas></div></div><div class="col-12 col-lg-5"><div class="panel chart-panel"><h3>{{t('chart_styles')}}</h3><canvas id="stylesChart"></canvas></div></div><div class="col-12"><div class="panel"><h3>{{t('top_breweries')}}</h3>{% for name,n,a in top %}<div class="top-row"><b>{{name}}</b><span>{{n}} reviews</span><strong>★ {{'%.1f'|format(a)}}</strong></div>{% else %}<p class="muted">{{t('no_data')}}</p>{% endfor %}</div></div></div>
-{% else %}<div class="empty panel">{{t('no_data')}}</div>{% endif %}{% endblock %}
-{% block scripts %}{% if count %}<script>
-const chartOpts={plugins:{legend:{labels:{color:'#ddd'}}},scales:{x:{ticks:{color:'#aaa'},grid:{color:'#292929}},y:{ticks:{color:'#aaa'},grid:{color:'#292929'}}}};
-new Chart(document.getElementById('ratingsChart'),{type:'bar',data:{labels:Object.keys({{ratings|tojson}}),datasets:[{label:'Reviews',data:Object.values({{ratings|tojson}}),backgroundColor:'#d99b28',borderRadius:5}]},options:chartOpts});
-new Chart(document.getElementById('stylesChart'),{type:'doughnut',data:{labels:Object.keys({{styles|tojson}}),datasets:[{data:Object.values({{styles|tojson}}),backgroundColor:['#d99b28','#739b70','#8c6a9e','#b86f45','#557c9b','#b7a56b']}]},options:{plugins:{legend:{position:'bottom',labels:{color:'#ddd'}}}}});
-</script>{% endif %}{% endblock %}
